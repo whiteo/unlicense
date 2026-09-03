@@ -378,5 +378,10 @@ rpc.exports = {
     },
     writeProcessMemory: function (address, bytes) {
         return Memory.writeByteArray(ptr(address), bytes);
+    },
+    writeMultipleProcessMemory: function (patches) {
+        patches.forEach(([address, bytes]) => {
+            Memory.writeByteArray(ptr(address), bytes);
+        });
     }
 };

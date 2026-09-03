@@ -1,6 +1,6 @@
 import logging
 import struct
-from typing import Dict, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional
 
 from capstone import (  # type: ignore
     Cs, CS_ARCH_X86, CS_MODE_32, CS_MODE_64)
@@ -229,6 +229,7 @@ def _fix_import_references_in_process(
     arch = process_controller.architecture
     ptr_size = process_controller.pointer_size
 
+    patches: List[Tuple[int, List[int]]] = []
     for i, call_addrs in enumerate(api_to_calls.values()):
         for call_addr, _, instr_was_jmp in call_addrs:
             if arch == Architecture.X86_32:
@@ -248,4 +249,6 @@ def _fix_import_references_in_process(
             else:
                 # call [iat_addr + i * ptr_size]
                 new_instr = bytes([0xFF, 0x15]) + struct.pack(fmt, operand)
-            process_controller.write_process_memory(call_addr, list(new_instr))
+            patches.append((call_addr, list(new_instr)))
+
+    process_controller.write_multiple_process_memory(patches)
