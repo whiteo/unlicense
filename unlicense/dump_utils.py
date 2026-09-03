@@ -79,7 +79,7 @@ def dump_pe(
     gc.collect()
 
     with TemporaryDirectory() as tmp_dir:
-        TMP_FILE_PATH1 = os.path.join(tmp_dir, "unlicense.tmp2")
+        TMP_FILE_PATH1 = os.path.join(tmp_dir, "unlicense.tmp1")
         TMP_FILE_PATH2 = os.path.join(tmp_dir, "unlicense.tmp2")
         try:
             pyscylla.dump_pe(process_controller.pid, image_base, oep,
