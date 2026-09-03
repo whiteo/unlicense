@@ -3,6 +3,23 @@
 ## [Unreleased]
 ### Fixed
 - Improve reliability of DLL unpacking
+- Fix out-of-bounds reads that aborted the import call site scan near the end of a section
+- Do not patch import call sites that are too short to hold the replacement instruction
+- Discard export hashes claimed by several exports instead of resolving wrappers to an arbitrary one
+- Treat wrappers that emulate to a non-export as unresolved
+- Bound wrapper emulation and ignore its result when it did not resolve
+- Fix the IAT candidate size, start search and page walk for Themida/WinLicense 3.x
+- Pass the DLL and its entry point to `rundll32` as a single argument
+- Use the SysWOW64 `rundll32` when running a 32-bit interpreter
+- Load DLLs with their own directory on the loader search path
+- Fix a hang when unprotecting potential OEP ranges one page at a time
+- Report the OEP of a DLL through the `DllMain` path on execution faults reported as reads
+- Only emit ANSI colors when the console can interpret them
+- Fix a temporary file name collision while dumping
+
+### Changed
+- Batch import call site patches to cut the number of RPC round-trips
+- Gate the frida agent's per-event logging behind `--verbose`
 
 ## [0.4.0] - 2023-08-14
 ### Added
