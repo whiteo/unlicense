@@ -12,7 +12,6 @@ from .dump_utils import dump_dotnet_assembly, dump_pe, get_section_ranges, inter
 from .logger import setup_logger
 from .version_detection import detect_winlicense_version
 
-# Supported Themida/WinLicense major versions
 SUPPORTED_VERSIONS = [2, 3]
 LOG = logging.getLogger("unlicense")
 
@@ -67,7 +66,6 @@ def run_unlicense(
         LOG.error("'%s' isn't a file or doesn't exist", pe_path)
         sys.exit(1)
 
-    # Detect Themida/Winlicense version if needed
     if target_version is None:
         target_version = detect_winlicense_version(pe_to_dump)
         if target_version is None:
@@ -78,7 +76,6 @@ def run_unlicense(
         sys.exit(2)
     LOG.info("Detected packer version: %d.x", target_version)
 
-    # Check PE architecture and bitness
     if not interpreter_can_dump_pe(pe_to_dump):
         LOG.error("Target PE cannot be dumped with this interpreter. "
                   "This is most likely a 32 vs 64 bit mismatch.")
@@ -104,11 +101,9 @@ def run_unlicense(
         is_dotnet = dotnet
         oep_reached.set()
 
-    # Spawn the packed executable and instrument it to find its OEP
     process_controller = frida_exec.spawn_and_instrument(
         pe_path, text_section_ranges, notify_oep_reached, verbose)
     try:
-        # Block until OEP is reached
         if not oep_reached.wait(float(timeout)):
             LOG.error("Original entry point wasn't reached before timeout")
             sys.exit(4)
@@ -122,7 +117,6 @@ def run_unlicense(
             dumped_oep = dumped_image_base + force_oep
             LOG.info("Using given OEP RVA value instead (%s)", hex(force_oep))
 
-        # Pick the range that contains the OEP
         text_section_range = text_section_ranges[0]
         for range in text_section_ranges:
             if range.contains(dumped_oep - dumped_image_base):
@@ -133,11 +127,9 @@ def run_unlicense(
             LOG.info("Dumping .NET assembly ...")
             if not dump_dotnet_assembly(process_controller, dumped_image_base):
                 LOG.error(".NET assembly dump failed")
-        # Do not bother recovering imports and start dumping if requested
         elif no_imports:
             dump_pe(process_controller, pe_to_dump, dumped_image_base,
                     dumped_oep, 0, 0, True)
-        # Fix imports and dump the executable
         elif target_version == 2:
             winlicense2.fix_and_dump_pe(process_controller, pe_to_dump,
                                         dumped_image_base, dumped_oep,
@@ -147,7 +139,6 @@ def run_unlicense(
                                         dumped_image_base, dumped_oep,
                                         section_ranges, text_section_range)
     finally:
-        # Try to kill the process on exit
         process_controller.terminate_process()
 
 

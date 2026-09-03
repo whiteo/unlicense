@@ -39,10 +39,8 @@ def probe_text_sections(pe_file_path: str) -> Optional[List[MemoryRange]]:
         LOG.error("Failed to parse PE '%s'", pe_file_path)
         return None
 
-    # Find the potential original text sections (i.e., executable sections with
-    # "empty" names or named '.text*').
-    # Note(ergrelet): we thus do not want to include Themida/WinLicense's
-    # sections in that list.
+    # Executable sections with "empty" or '.text*' names, which excludes
+    # Themida/WinLicense's own sections
     for section in lief_pe_sections(binary):
         section_name = section.fullname
         stripped_section_name = section_name.replace(' ',
@@ -72,9 +70,7 @@ def dump_pe(
     iat_size: int,
     add_new_iat: bool,
 ) -> bool:
-    # Reclaim as much memory as possible. This is kind of a hack for 32-bit
-    # interpreters not to run out of memory when dumping.
-    # Idea: `pefile` might be less memory hungry than `lief` for our use case?
+    # Keeps 32-bit interpreters from running out of memory while dumping
     process_controller.clear_cached_data()
     gc.collect()
 
@@ -142,14 +138,12 @@ def _rebuild_pe(pe_file_path: str, output_file_path: str) -> None:
         LOG.error("Failed to parse PE '%s'", pe_file_path)
         return
 
-    # Rename sections
     _resolve_section_names(binary)
 
     # Disable ASLR
     binary.header.add_characteristic(
         lief.PE.HEADER_CHARACTERISTICS.RELOCS_STRIPPED)
     binary.optional_header.remove(lief.PE.DLL_CHARACTERISTICS.DYNAMIC_BASE)
-    # Rebuild PE
     builder = lief.PE.Builder(binary)
     builder.build_dos_stub(True)
     builder.build_overlay(True)
@@ -178,9 +172,7 @@ def _resize_pe(pe_file_path: str, output_file_path: str) -> None:
     if pe_size is None:
         return None
 
-    # Copy file
     shutil.copy(pe_file_path, output_file_path)
-    # Truncate file
     with open(output_file_path, "ab") as pe_file:
         pe_file.truncate(pe_size)
 
@@ -193,13 +185,10 @@ def _get_pe_size(pe_file_path: str) -> Optional[int]:
 
     number_of_sections = len(binary.sections)
     if number_of_sections == 0:
-        # Shouldn't happen but hey
         return None
 
-    # Determine the actual PE raw size
     highest_section = binary.sections[0]
     for section in lief_pe_sections(binary):
-        # Select section with the highest offset
         if section.offset > highest_section.offset:
             highest_section = section
         # If sections have the same offset, select the one with the biggest size
@@ -223,20 +212,15 @@ def interpreter_can_dump_pe(pe_file_path: str) -> bool:
     binary = lief.parse(pe_file_path)
     pe_architecture = binary.header.machine
 
-    # 64-bit OS on x86
     if current_platform == "AMD64":
         bitness = struct.calcsize("P") * 8
         if bitness == 64:
-            # Only 64-bit PEs are supported
             return bool(pe_architecture == lief.PE.MACHINE_TYPES.AMD64)
         if bitness == 32:
-            # Only 32-bit PEs are supported
             return bool(pe_architecture == lief.PE.MACHINE_TYPES.I386)
         return False
 
-    # 32-bit OS on x86
     if current_platform == "x86":
-        # Only 32-bit PEs are supported
         return bool(pe_architecture == lief.PE.MACHINE_TYPES.I386)
 
     return False

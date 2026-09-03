@@ -51,7 +51,6 @@ def resolve_wrapped_api(
                                                process_controller.page_size)
         uc.mem_map(aligned_addr, process_controller.page_size, UC_PROT_ALL)
 
-        # Setup a stack
         stack_size = 3 * process_controller.page_size
         stack_start = stack_addr + stack_size - process_controller.page_size
         uc.mem_map(stack_addr, stack_size, UC_PROT_READ | UC_PROT_WRITE)
@@ -62,10 +61,8 @@ def resolve_wrapped_api(
         uc.reg_write(sp_register, stack_start)
         uc.reg_write(bp_register, stack_start)
 
-        # Setup FS/GSBASE
         setup_teb(uc, process_controller)
 
-        # Setup hooks
         if expected_ret_addr is None:
             stop_on_ret_addr = STACK_MAGIC_RET_ADDR
         else:
@@ -88,7 +85,6 @@ def resolve_wrapped_api(
                       hex(wrapper_start_addr))
             return None
 
-        # Read and return PC
         pc = uc.reg_read(result_register)
         assert isinstance(pc, int)
 
@@ -111,7 +107,6 @@ def _setup_teb_x86(uc: Uc, process_info: ProcessController) -> None:
     MSG_IA32_FS_BASE = 0xC0000100
     teb_addr = 0xff100000
     peb_addr = 0xff200000
-    # Map tables
     uc.mem_map(teb_addr, process_info.page_size, UC_PROT_READ | UC_PROT_WRITE)
     uc.mem_map(peb_addr, process_info.page_size, UC_PROT_READ | UC_PROT_WRITE)
     uc.mem_write(teb_addr + 0x18, struct.pack(pointer_size_to_fmt(4),
@@ -125,7 +120,6 @@ def _setup_teb_x64(uc: Uc, process_info: ProcessController) -> None:
     MSG_IA32_GS_BASE = 0xC0000101
     teb_addr = 0xff10000000000000
     peb_addr = 0xff20000000000000
-    # Map tables
     uc.mem_map(teb_addr, process_info.page_size, UC_PROT_READ | UC_PROT_WRITE)
     uc.mem_map(peb_addr, process_info.page_size, UC_PROT_READ | UC_PROT_WRITE)
     uc.mem_write(teb_addr + 0x30, struct.pack(pointer_size_to_fmt(8),
@@ -156,8 +150,7 @@ def _unicorn_hook_unmapped(uc: Uc, _access: Any, address: int, _size: int,
         LOG.error("ERROR: %s", str(e))
         return False
     except ReadProcessMemoryError as e:
-        # Log this error as debug as it's expected to happen in cases where we
-        # reach the end of the IAT.
+        # Expected when we reach the end of the IAT
         LOG.debug("ERROR: %s", str(e))
         return False
     except Exception as e:
@@ -195,7 +188,6 @@ def _unicorn_hook_block(
         if ret_addr == stop_on_ret_addr or \
             ret_addr == stop_on_ret_addr + 1 \
                 or ret_addr == STACK_MAGIC_RET_ADDR:
-            # Most wrappers should end up here directly
             resolved[0] = True
             uc.reg_write(result_register, address)
             uc.emu_stop()
@@ -211,22 +203,16 @@ def _unicorn_hook_block(
             # Note: Starting with Themida 3.1.4.0, wrappers call some useless
             # APIs to fool emulation-based unwrappers
             LOG.debug("Reached bogus API call, skipping")
-            # "Simulate" bogus call
             result, arg_count = _simulate_bogus_api(api_name)
-            # Set result
             uc.reg_write(result_register, result)
 
-            # Fix the stack
             if arch == Architecture.X86_32:
-                # Pop return address and arguments from the stack
                 uc.reg_write(sp_register, sp + ptr_size * (1 + arg_count))
             elif arch == Architecture.X86_64:
-                # Pop return address and arguments from the stack
                 stack_arg_count = max(0, arg_count - 4)
                 uc.reg_write(sp_register,
                              sp + ptr_size * (1 + stack_arg_count))
 
-            # Set next address
             uc.reg_write(pc_register, ret_addr)
             return
 

@@ -17,7 +17,6 @@ def setup_logger(logger: logging.Logger, verbose: bool) -> None:
 
     logger.setLevel(log_level)
 
-    # Create a console handler with a higher log level
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(log_level)
 

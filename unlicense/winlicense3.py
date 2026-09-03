@@ -64,7 +64,6 @@ def _find_iat(process_controller: ProcessController, image_base: int,
                                                       section_ranges,
                                                       exports_dict)
     if linear_scan_result is not None:
-        # Linear scan found something, return that
         return linear_scan_result
 
     # Second way: look for wrapped imports in the text section
@@ -130,7 +129,6 @@ def _find_iat_from_code_sections(
                                                text_section_range.size))
     assert text_section_range.data is not None
 
-    # Instanciate the disassembler
     arch = process_controller.architecture
     if arch == Architecture.X86_32:
         cs_mode = CS_MODE_32
@@ -165,15 +163,12 @@ def _find_iat_from_code_sections(
         cur_ptr = ordered_ptr_list[i]
 
         if cur_ptr == prev_ptr + pointer_size:
-            # Same chunk -> expand
             current_chunk_size += 1
         else:
-            # New chunk -> reset
             current_chunk_index = i
             current_chunk_size = 0
 
         if current_chunk_size > biggest_chunk_size:
-            # Update biggest chunk
             biggest_chunk_index = current_chunk_index
             biggest_chunk_size = current_chunk_size
 
@@ -206,7 +201,6 @@ def _find_iat_start(data: bytes, exports: Dict[int, Dict[str, Any]],
                 start_offset = i
                 break
         except QueryProcessMemoryError:
-            # Ignore invalid pointers
             pass
 
     elem_count = min(IAT_MAX_SCANNED_ELEMENTS,
@@ -303,12 +297,9 @@ def _unwrap_iat(
 
                 # Dumb check to detect the "end" of the IAT
                 if resolved_api is None and successive_failures >= IAT_MAX_SUCCESSIVE_FAILURES:
-                    # Remove the last elements
                     new_iat_data = new_iat_data[:last_resolution_offset]
-                    # Ensure the range is writable
                     process_controller.set_memory_protection(
                         iat_range.base, len(new_iat_data), "rw-")
-                    # Update IAT
                     process_controller.write_process_memory(
                         iat_range.base, list(new_iat_data))
                     return len(new_iat_data), resolved_import_count
@@ -328,12 +319,9 @@ def _unwrap_iat(
 
         current_addr += data_size
 
-    # Update IAT with the our newly computed IAT
     if len(new_iat_data) > 0:
-        # Ensure the range is writable
         process_controller.set_memory_protection(iat_range.base,
                                                  len(new_iat_data), "rw-")
-        # Update IAT
         process_controller.write_process_memory(iat_range.base,
                                                 list(new_iat_data))
         return len(new_iat_data), resolved_import_count

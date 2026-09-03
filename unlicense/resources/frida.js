@@ -54,9 +54,7 @@ function rangeContainsAddress(range, address) {
 function notifyOepFound(dumpedModule, oepCandidate) {
     oepReached = true;
     
-    // Make OEP ranges readable and writeable during the dumping phase
     setOepRangesProtection('rw-');
-    // Remove hooks used to find the OEP
     removeOepTracingHooks();
 
     let isDotNetInitialized = isDotNetProcess();
@@ -95,7 +93,6 @@ function unprotectFaultRange(dumpedModule, expectedOepRanges, faultAddress) {
 }
 
 function makeOepRangesInaccessible(dumpedModule, expectedOepRanges) {
-    // Ensure potential OEP ranges are not accessible
     expectedOepRanges.forEach((oepRange) => {
         const sectionStart = dumpedModule.base.add(oepRange[0]);
         const expectedSectionSize = oepRange[1];
@@ -105,7 +102,6 @@ function makeOepRangesInaccessible(dumpedModule, expectedOepRanges) {
 }
 
 function setOepRangesProtection(protection) {
-    // Set pages' protection
     originalPageProtections.forEach((size, address_str, _map) => {
         Memory.protect(ptr(address_str), size, protection);
     });
@@ -119,33 +115,27 @@ function removeOepTracingHooks() {
 }
 
 function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) {
-    // Register an exception handler that'll detect the OEP
     Process.setExceptionHandler(exp => {
         let oepCandidate = exp.context.pc;
         let threadId = Process.getCurrentThreadId();
 
         if (exp.memory != null) {
-            // Weird case where executing code actually only triggers a "read"
-            // access violation on inaccessible pages. This can happen on some
-            // 32-bit executables.
+            // Some 32-bit executables report an execution fault on an
+            // inaccessible page as a "read" access violation
             const execFaultAsRead = exp.memory.operation == "read" &&
                 exp.memory.address.equals(exp.context.pc);
 
             // DLLs are handled below, where `DllMain` is skipped instead
             if (execFaultAsRead && !moduleIsDll) {
-                // If we're in a TLS callback, the first argument is the
-                // module's base address
                 if (isTlsCallback(exp.context, dumpedModule)) {
                     log(`TLS callback #${tlsCallbackCount} detected (at ${exp.context.pc}), skipping ...`);
                     tlsCallbackCount++;
 
-                    // Modify PC to skip the callback's execution and return
                     skipTlsCallback(exp.context);
                     return true;
                 }
 
                 info(`OEP found (thread #${threadId}): ${oepCandidate}`);
-                // Report the potential OEP
                 notifyOepFound(dumpedModule, oepCandidate);
             }
 
@@ -173,19 +163,14 @@ function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) 
                     log(`TLS callback #${tlsCallbackCount} detected (at ${exp.context.pc}), skipping ...`);
                     tlsCallbackCount++;
 
-                    // Modify PC to skip the callback's execution and return
                     skipTlsCallback(exp.context);
                     expectionHandled = true;
                     return;
                 }
 
                 if (moduleIsDll) {
-                    // Report the potential OEP
-                    // Note: When dumping DLLs we have to release the loader
-                    // lock before starting to dump.
-                    // Other threads might call `DllMain` with the `DLL_THREAD_ATTACH`
-                    // or `DLL_THREAD_DETACH` reasons later so we also skip the `DllMain`
-                    // even after the OEP has been reached.
+                    // The loader lock must be released before dumping, and
+                    // other threads still call `DllMain` on attach/detach
                     if (!oepReached) {
                         const threadId = Process.getCurrentThreadId();
                         ldrUnlockLoaderLock(0, ptr(threadId << 16));
@@ -200,7 +185,6 @@ function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) 
                     return;
                 }
 
-                // Report the potential OEP
                 info(`OEP found (thread #${threadId}): ${oepCandidate}`);
                 // Note: never returns
                 notifyOepFound(dumpedModule, oepCandidate);
@@ -214,14 +198,11 @@ function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) 
 
 function isTlsCallback(exceptionCtx, dumpedModule) {
     if (Process.arch == "x64") {
-        // If we're in a TLS callback, the first argument is the
-        // module's base address
         let moduleBase = exceptionCtx.rcx;
         if (!moduleBase.equals(dumpedModule.base)) {
             return false;
         }
-        // If we're in a TLS callback, the second argument is the
-        // reason (from 0 to 3).
+        // Second argument is the reason, from 0 to 3
         let reason = exceptionCtx.rdx;
         if (reason.compare(ptr(4)) > 0) {
             return false;
@@ -267,7 +248,6 @@ function skipDllEntryPoint(exceptionCtx) {
     }
 }
 
-// Define available RPCs
 rpc.exports = {
     addDllSearchPath: function (directoryPath) {
         const directory = Memory.allocUtf16String(directoryPath);
@@ -294,7 +274,6 @@ rpc.exports = {
 
         initializeTrampolines();
 
-        // If the target isn't a DLL, it should be loaded already
         if (!targetIsDll) {
             dumpedModule = Process.findModuleByName(moduleName);
         }
@@ -306,8 +285,7 @@ rpc.exports = {
                 onEnter: function (args) {
                     let addr = args[1].readPointer();
                     if (dumpedModule != null && addr.equals(dumpedModule.base)) {
-                        // Reset potential OEP ranges to not accessible to
-                        // (hopefully) catch the entry point next time.
+                        // Try to catch the entry point on the next pass
                         makeOepRangesInaccessible(dumpedModule, expectedOepRanges);
                         if (!exceptionHandlerRegistered) {
                             registerExceptionHandler(dumpedModule, expectedOepRanges, targetIsDll);
@@ -319,9 +297,8 @@ rpc.exports = {
             oepTracingListeners.push(ntProtectVirtualMemoryListener);
         }
 
-        // Hook `ntdll.RtlActivateActivationContextUnsafeFast` on exit as a mean
-        // to get called after new PE images are loaded and before their entry
-        // point is called. Needed to unpack DLLs.
+        // Called after a new PE image is loaded but before its entry
+        // point runs. Needed to unpack DLLs.
         let initializeFusionHooked = false;
         const activateActivationContext = Module.findExportByName('ntdll', 'RtlActivateActivationContextUnsafeFast');
         const activateActivationContextListener = Interceptor.attach(activateActivationContext, {
@@ -329,12 +306,10 @@ rpc.exports = {
                 if (dumpedModule == null) {
                     dumpedModule = Process.findModuleByName(moduleName);
                     if (dumpedModule == null) {
-                        // Module isn't loaded yet
                         return;
                     }
                     log(`Target module has been loaded (thread #${this.threadId}) ...`);
                 }
-                // After this, the target module is loaded.
 
                 if (targetIsDll) {
                     if (!exceptionHandlerRegistered) {
@@ -344,9 +319,8 @@ rpc.exports = {
                     }
                 }
 
-                // Hook `clr.InitializeFusion` if present.
-                // This is used to detect a good point during the CLR's
-                // initialization, to dump .NET EXE assemblies
+                // A usable point in the CLR's initialization to dump .NET
+                // EXE assemblies
                 const initializeFusion = Module.findExportByName('clr', 'InitializeFusion');
                 if (initializeFusion != null && !initializeFusionHooked) {
                     const initializeFusionListener = Interceptor.attach(initializeFusion, {
@@ -363,7 +337,6 @@ rpc.exports = {
         oepTracingListeners.push(activateActivationContextListener);
     },
     notifyDumpingFinished: function () {
-        // Make OEP executable again once dumping is finished
         setOepRangesProtection('rwx');
     },
     getArchitecture: function () { return Process.arch; },
