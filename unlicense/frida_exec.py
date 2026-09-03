@@ -2,7 +2,7 @@ import functools
 import logging
 from importlib import resources
 from pathlib import Path
-from typing import (List, Callable, Dict, Any, Optional)
+from typing import (List, Callable, Dict, Any, Optional, Tuple)
 
 import frida
 import frida.core
@@ -14,6 +14,7 @@ from .process_control import (ProcessController, Architecture, MemoryRange,
 LOG = logging.getLogger(__name__)
 # See issue #7: messages cannot exceed 128MiB
 MAX_DATA_CHUNK_SIZE = 64 * 1024 * 1024
+PATCH_BATCH_SIZE = 5000
 
 OepReachedCallback = Callable[[int, int, bool], None]
 
@@ -126,6 +127,16 @@ class FridaProcessController(ProcessController):
     def write_process_memory(self, address: int, data: List[int]) -> None:
         try:
             self._frida_rpc.write_process_memory(hex(address), data)
+        except frida.core.RPCException as rpc_exception:
+            raise WriteProcessMemoryError from rpc_exception
+
+    def write_multiple_process_memory(
+            self, patches: List[Tuple[int, List[int]]]) -> None:
+        try:
+            for offset in range(0, len(patches), PATCH_BATCH_SIZE):
+                batch = patches[offset:offset + PATCH_BATCH_SIZE]
+                self._frida_rpc.write_multiple_process_memory(
+                    [[hex(address), data] for address, data in batch])
         except frida.core.RPCException as rpc_exception:
             raise WriteProcessMemoryError from rpc_exception
 
