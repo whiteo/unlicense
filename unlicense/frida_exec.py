@@ -143,9 +143,20 @@ class FridaProcessController(ProcessController):
             raise WriteProcessMemoryError from rpc_exception
 
     def terminate_process(self) -> None:
-        self._frida_rpc.notify_dumping_finished()
-        frida.kill(self.pid)
-        self._frida_session.detach()
+        try:
+            self._frida_rpc.notify_dumping_finished()
+        except frida.InvalidOperationError:
+            pass
+
+        try:
+            frida.kill(self.pid)
+        except Exception as error:  # pylint: disable=broad-except
+            LOG.warning("Failed to kill process %d: %s", self.pid, str(error))
+
+        try:
+            self._frida_session.detach()
+        except Exception as error:  # pylint: disable=broad-except
+            LOG.debug("Failed to detach session: %s", str(error))
 
     def _frida_range_to_mem_range(self, dict_range: Dict[str, Any],
                                   with_data: bool) -> MemoryRange:
@@ -184,9 +195,10 @@ def _prepend_to_path(directory: str) -> None:
         [directory, os.environ.get("PATH", "")])
 
 
-def spawn_and_instrument(
-        pe_path: Path, text_section_ranges: List[MemoryRange],
-        notify_oep_reached: OepReachedCallback) -> ProcessController:
+def spawn_and_instrument(pe_path: Path,
+                         text_section_ranges: List[MemoryRange],
+                         notify_oep_reached: OepReachedCallback,
+                         verbose: bool = False) -> ProcessController:
     pid: int
     pe_directory = str(pe_path.resolve().parent)
     target_is_dll = pe_path.suffix == ".dll"
@@ -215,7 +227,8 @@ def spawn_and_instrument(
     if target_is_dll:
         frida_rpc.add_dll_search_path(pe_directory)
     frida_rpc.setup_oep_tracing(pe_path.name, [[r.base, r.size]
-                                               for r in text_section_ranges])
+                                               for r in text_section_ranges],
+                                verbose)
     frida.resume(pid)
 
     return process_controller

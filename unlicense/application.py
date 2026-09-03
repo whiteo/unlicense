@@ -82,7 +82,7 @@ def run_unlicense(
 
     # Spawn the packed executable and instrument it to find its OEP
     process_controller = frida_exec.spawn_and_instrument(
-        pe_path, text_section_ranges, notify_oep_reached)
+        pe_path, text_section_ranges, notify_oep_reached, verbose)
     try:
         # Block until OEP is reached
         if not oep_reached.wait(float(timeout)):
