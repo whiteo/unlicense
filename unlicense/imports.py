@@ -65,12 +65,18 @@ def find_wrapped_imports(
         instrs = md.disasm(text_section_data[i:i + 6], instr_addr)
 
         # Ensure the instructions are "call/jmp" or "nop; call/jmp"
-        instruction = next(instrs)
+        instruction = next(instrs, None)
+        if instruction is None:
+            i += 1
+            continue
         if instruction.mnemonic in ["call", "jmp"]:
             call_size = instruction.size
             op = instruction.operands[0]
         elif instruction.mnemonic == "nop":
-            instruction = next(instrs)
+            instruction = next(instrs, None)
+            if instruction is None:
+                i += 1
+                continue
             if instruction.mnemonic in ["call", "jmp"]:
                 call_size = instruction.size
                 op = instruction.operands[0]
@@ -137,7 +143,7 @@ def _is_wrapped_thunk_jmp(code_section_data: bytes, offset: int) -> bool:
     """
     Check if the instruction at `offset` is a wrapped jmp from a thunk table.
     """
-    if offset > len(code_section_data) - 6:
+    if offset + 6 >= len(code_section_data):
         return False
 
     is_e9_jmp = code_section_data[offset] == 0xE9
@@ -160,6 +166,9 @@ def _is_wrapped_call(code_section_data: bytes, offset: int) -> bool:
     Check if the instruction at `offset` is a wrapped import call. Themida 2.x
     replaces `FF15` calls with `E8` calls followed or preceded by a `nop`.
     """
+    if offset + 5 >= len(code_section_data):
+        return False
+
     return (code_section_data[offset] == 0xE8 and code_section_data[offset + 5] == 0x90) or \
            (code_section_data[offset:offset + 2] == bytes([0x90, 0xE8]))
 
@@ -169,6 +178,9 @@ def _is_wrapped_tail_call(code_section_data: bytes, offset: int) -> bool:
     Check if the instruction at `offset` is a tail call (and thus should be
     transformed into a `jmp`).
     """
+    if offset + 6 >= len(code_section_data):
+        return False
+
     is_call = code_section_data[offset] == 0xE8
     return (is_call and code_section_data[offset + 5] == 0xCC) or \
             (is_call and code_section_data[offset + 6] == 0xCC) or \
