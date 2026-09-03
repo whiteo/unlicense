@@ -57,8 +57,8 @@ def fix_and_dump_pe(process_controller: ProcessController, pe_file_path: str,
                                                 process_controller)
 
     LOG.info("Resolving imports ...")
-    _resolve_imports(api_to_calls, wrapper_set, export_hashes, md,
-                     process_controller)
+    _resolve_imports(api_to_calls, wrapper_set, export_hashes, exports_dict,
+                     md, process_controller)
     LOG.info("Imports resolved: %d", len(api_to_calls))
 
     iat_addr, iat_size = _generate_new_iat_in_process(api_to_calls,
@@ -90,7 +90,8 @@ def _generate_export_hashes(
     Go through the given export dictionary and produce a hash for each function
     listed in it.
     """
-    result = {}
+    result: Dict[int, int] = {}
+    ambiguous_hashes = set()
     modules = process_controller.enumerate_modules()
     LOG.debug("Hashing exports for %s", str(modules))
     ranges = []
@@ -114,18 +115,23 @@ def _generate_export_hashes(
     for i, (export_addr, _) in enumerate(exports_dict.items()):
         export_hash = compute_function_hash(md, export_addr, get_data,
                                             process_controller)
-        if export_hash != EMPTY_FUNCTION_HASH:
-            result[export_hash] = export_addr
-        else:
+        if export_hash == EMPTY_FUNCTION_HASH:
             LOG.debug("Empty hash for %s", hex(export_addr))
+        elif result.setdefault(export_hash, export_addr) != export_addr:
+            ambiguous_hashes.add(export_hash)
         LOG.debug("Exports hashed: %d/%d", i, exports_count)
+
+    # Hashes shared by several exports cannot be resolved unambiguously
+    for export_hash in ambiguous_hashes:
+        del result[export_hash]
 
     return result
 
 
 def _resolve_imports(api_to_calls: ImportToCallSiteDict,
                      wrapper_set: WrapperSet,
-                     export_hashes: Optional[Dict[int, int]], md: Cs,
+                     export_hashes: Optional[Dict[int, int]],
+                     exports_dict: Dict[int, Dict[str, Any]], md: Cs,
                      process_controller: ProcessController) -> None:
     """
     Resolve potential import wrappers by hash-matching or emulation.
@@ -185,14 +191,22 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
         # Try to resolve the destination address by emulating the wrapper
         resolved_addr = resolve_wrapped_api(call_addr, process_controller,
                                             call_addr + call_size)
-        if resolved_addr is not None:
-            LOG.debug("Resolved API: %s -> %s", hex(wrapper_addr),
-                      hex(resolved_addr))
-            resolved_wrappers[wrapper_addr] = resolved_addr
-            api_to_calls[resolved_addr].append(
-                (call_addr, call_size, instr_was_jmp, patchable))
-        else:
+        if resolved_addr is None:
             problematic_wrappers.add(wrapper_addr)
+            continue
+
+        # Emulation can land anywhere, but only exports can be rebuilt
+        if resolved_addr not in exports_dict:
+            LOG.debug("Wrapper %s emulated to non-export %s, dropping",
+                      hex(wrapper_addr), hex(resolved_addr))
+            problematic_wrappers.add(wrapper_addr)
+            continue
+
+        LOG.debug("Resolved API: %s -> %s", hex(wrapper_addr),
+                  hex(resolved_addr))
+        resolved_wrappers[wrapper_addr] = resolved_addr
+        api_to_calls[resolved_addr].append(
+            (call_addr, call_size, instr_was_jmp, patchable))
 
 
 def _generate_new_iat_in_process(
