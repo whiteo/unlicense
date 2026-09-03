@@ -1,8 +1,6 @@
 "use strict";
 
-const green = "\x1b[1;36m"
-const reset = "\x1b[0m"
-
+// No ANSI colors: legacy conhost without VT100 prints raw escape sequences
 let allocatedBuffers = [];
 let originalPageProtections = new Map();
 let oepTracingListeners = [];
@@ -18,7 +16,7 @@ let skipTlsInstr64 = null;
 let tlsCallbackCount = 0;
 
 function log(message) {
-    console.log(`${green}frida-agent${reset}: ${message}`);
+    console.log(`frida-agent: ${message}`);
 }
 
 function initializeTrampolines() {
