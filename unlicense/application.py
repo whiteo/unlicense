@@ -17,8 +17,32 @@ SUPPORTED_VERSIONS = [2, 3]
 LOG = logging.getLogger("unlicense")
 
 
+def _print_banner() -> None:
+    print("Original: unlicense by ergrelet - "
+          "https://github.com/ergrelet/unlicense")
+    print("Patched by whiteo - https://github.com/whiteo\n", flush=True)
+
+
 def main() -> None:
-    fire.Fire(run_unlicense)
+    _print_banner()
+
+    # Keep the output readable when launched from the file explorer
+    try:
+        fire.Fire(run_unlicense)
+    finally:
+        _pause_before_exit()
+
+
+def _pause_before_exit() -> None:
+    if not sys.stdout.isatty():
+        return
+
+    try:
+        import msvcrt  # pylint: disable=import-outside-toplevel
+        print("\nPress any key to exit...", flush=True)
+        msvcrt.getch()
+    except Exception:  # pylint: disable=broad-except
+        pass
 
 
 def run_unlicense(
