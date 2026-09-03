@@ -11,6 +11,9 @@ from .process_control import Architecture, ProcessController, MemoryRange, Query
 
 LOG = logging.getLogger(__name__)
 IAT_MAX_SUCCESSIVE_FAILURES = 2
+IAT_MAX_SCANNED_ELEMENTS = 100
+# Windows reserves the first 64 KiB of the address space
+MIN_VALID_ADDRESS = 0x10000
 
 
 def fix_and_dump_pe(process_controller: ProcessController, pe_file_path: str,
@@ -61,7 +64,6 @@ def _find_iat(process_controller: ProcessController, image_base: int,
                                                       section_ranges,
                                                       exports_dict)
     if linear_scan_result is not None:
-        # Linear scan found something, return that
         return linear_scan_result
 
     # Second way: look for wrapped imports in the text section
@@ -127,7 +129,6 @@ def _find_iat_from_code_sections(
                                                text_section_range.size))
     assert text_section_range.data is not None
 
-    # Instanciate the disassembler
     arch = process_controller.architecture
     if arch == Architecture.X86_32:
         cs_mode = CS_MODE_32
@@ -162,20 +163,17 @@ def _find_iat_from_code_sections(
         cur_ptr = ordered_ptr_list[i]
 
         if cur_ptr == prev_ptr + pointer_size:
-            # Same chunk -> expand
             current_chunk_size += 1
         else:
-            # New chunk -> reset
             current_chunk_index = i
             current_chunk_size = 0
 
         if current_chunk_size > biggest_chunk_size:
-            # Update biggest chunk
             biggest_chunk_index = current_chunk_index
             biggest_chunk_size = current_chunk_size
 
     iat_candidate_addr = ordered_ptr_list[biggest_chunk_index]
-    iat_candidate_size = biggest_chunk_size
+    iat_candidate_size = (biggest_chunk_size + 1) * pointer_size
     return MemoryRange(iat_candidate_addr, iat_candidate_size, "r--")
 
 
@@ -187,40 +185,40 @@ def _find_iat_start(data: bytes, exports: Dict[int, Dict[str, Any]],
     imports and 75% of pointers to R*X memory has been chosen empirically).
     Returns `None` if this doesn't look like there's an obfuscated IAT in `data`.
     """
-    ptr_format = pointer_size_to_fmt(process_controller.pointer_size)
-    elem_count = min(100, len(data) // process_controller.pointer_size)
-    LOG.debug("Scanning %d elements, pointer size is %d", elem_count,
-              process_controller.pointer_size)
-    data_size = elem_count * process_controller.pointer_size
+    ptr_size = process_controller.pointer_size
+    ptr_format = pointer_size_to_fmt(ptr_size)
     # Look for beginning of IAT
     start_offset = 0
-    for i in range(0,
-                   len(data) // process_controller.pointer_size,
-                   process_controller.pointer_size):
-        ptr = struct.unpack(ptr_format,
-                            data[i:i + process_controller.pointer_size])[0]
+    for i in range(0, len(data) - ptr_size + 1, ptr_size):
+        ptr = struct.unpack(ptr_format, data[i:i + ptr_size])[0]
         if ptr in exports:
             start_offset = i
             break
+        if ptr < MIN_VALID_ADDRESS:
+            continue
         try:
             if process_controller.query_memory_protection(ptr) == "rwx":
                 start_offset = i
                 break
         except QueryProcessMemoryError:
-            # Ignore invalid pointers
             pass
 
+    elem_count = min(IAT_MAX_SCANNED_ELEMENTS,
+                     (len(data) - start_offset) // ptr_size)
+    data_size = start_offset + elem_count * ptr_size
+    LOG.debug("Scanning %d elements, pointer size is %d", elem_count, ptr_size)
     LOG.debug("Potential start offset %s for the IAT", hex(start_offset))
     non_null_count = 0
     valid_ptr_count = 0
     rx_dest_count = 0
-    for i in range(start_offset, data_size, process_controller.pointer_size):
-        ptr = struct.unpack(ptr_format,
-                            data[i:i + process_controller.pointer_size])[0]
+    for i in range(start_offset, data_size, ptr_size):
+        ptr = struct.unpack(ptr_format, data[i:i + ptr_size])[0]
         if ptr != 0:
             non_null_count += 1
         if ptr in exports:
             valid_ptr_count += 1
+        if ptr < MIN_VALID_ADDRESS:
+            continue
         try:
             prot = process_controller.query_memory_protection(ptr)
             if prot[0] == 'r' and prot[2] == 'x':
@@ -261,13 +259,18 @@ def _unwrap_iat(
     resolved_import_count = 0
     successive_failures = 0
     last_resolution_offset = 0
-    for current_addr in range(iat_range.base, iat_range.base + iat_range.size,
-                              process_controller.page_size):
-        data_size = process_controller.page_size - (
-            current_addr % process_controller.page_size)
+    iat_end = iat_range.base + iat_range.size
+    current_addr = iat_range.base
+    while current_addr < iat_end:
+        data_size = min(
+            process_controller.page_size -
+            (current_addr % process_controller.page_size),
+            iat_end - current_addr)
         page_data = process_controller.read_process_memory(
             current_addr, data_size)
-        for i in range(0, len(page_data), process_controller.pointer_size):
+        for i in range(0,
+                       len(page_data) - process_controller.pointer_size + 1,
+                       process_controller.pointer_size):
             wrapper_start = struct.unpack(
                 ptr_format,
                 page_data[i:i + process_controller.pointer_size])[0]
@@ -294,12 +297,9 @@ def _unwrap_iat(
 
                 # Dumb check to detect the "end" of the IAT
                 if resolved_api is None and successive_failures >= IAT_MAX_SUCCESSIVE_FAILURES:
-                    # Remove the last elements
-                    new_iat_data = new_iat_data[:last_resolution_offset + 1]
-                    # Ensure the range is writable
+                    new_iat_data = new_iat_data[:last_resolution_offset]
                     process_controller.set_memory_protection(
                         iat_range.base, len(new_iat_data), "rw-")
-                    # Update IAT
                     process_controller.write_process_memory(
                         iat_range.base, list(new_iat_data))
                     return len(new_iat_data), resolved_import_count
@@ -317,12 +317,11 @@ def _unwrap_iat(
                 # Junk pointer (most likely null). Keep for alignment
                 new_iat_data += struct.pack(ptr_format, wrapper_start)
 
-    # Update IAT with the our newly computed IAT
+        current_addr += data_size
+
     if len(new_iat_data) > 0:
-        # Ensure the range is writable
         process_controller.set_memory_protection(iat_range.base,
                                                  len(new_iat_data), "rw-")
-        # Update IAT
         process_controller.write_process_memory(iat_range.base,
                                                 list(new_iat_data))
         return len(new_iat_data), resolved_import_count

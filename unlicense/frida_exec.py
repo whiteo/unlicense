@@ -1,8 +1,10 @@
 import functools
 import logging
+import os
+import struct
 from importlib import resources
 from pathlib import Path
-from typing import (List, Callable, Dict, Any, Optional)
+from typing import (List, Callable, Dict, Any, Optional, Tuple)
 
 import frida
 import frida.core
@@ -14,6 +16,7 @@ from .process_control import (ProcessController, Architecture, MemoryRange,
 LOG = logging.getLogger(__name__)
 # See issue #7: messages cannot exceed 128MiB
 MAX_DATA_CHUNK_SIZE = 64 * 1024 * 1024
+PATCH_BATCH_SIZE = 5000
 
 OepReachedCallback = Callable[[int, int, bool], None]
 
@@ -25,13 +28,11 @@ class FridaProcessController(ProcessController):
                  frida_script: frida.core.Script):
         frida_rpc = frida_script.exports
 
-        # Initialize ProcessController
         super().__init__(pid, main_module_name,
                          _str_to_architecture(frida_rpc.get_architecture()),
                          frida_rpc.get_pointer_size(),
                          frida_rpc.get_page_size())
 
-        # Initialize FridaProcessController specifics
         self._frida_rpc = frida_rpc
         self._frida_session = frida_session
         self._exported_functions_cache: Optional[Dict[int, Dict[str,
@@ -129,10 +130,31 @@ class FridaProcessController(ProcessController):
         except frida.core.RPCException as rpc_exception:
             raise WriteProcessMemoryError from rpc_exception
 
+    def write_multiple_process_memory(
+            self, patches: List[Tuple[int, List[int]]]) -> None:
+        try:
+            for offset in range(0, len(patches), PATCH_BATCH_SIZE):
+                batch = patches[offset:offset + PATCH_BATCH_SIZE]
+                self._frida_rpc.write_multiple_process_memory(
+                    [[hex(address), data] for address, data in batch])
+        except frida.core.RPCException as rpc_exception:
+            raise WriteProcessMemoryError from rpc_exception
+
     def terminate_process(self) -> None:
-        self._frida_rpc.notify_dumping_finished()
-        frida.kill(self.pid)
-        self._frida_session.detach()
+        try:
+            self._frida_rpc.notify_dumping_finished()
+        except frida.InvalidOperationError:
+            pass
+
+        try:
+            frida.kill(self.pid)
+        except Exception as error:  # pylint: disable=broad-except
+            LOG.warning("Failed to kill process %d: %s", self.pid, str(error))
+
+        try:
+            self._frida_session.detach()
+        except Exception as error:  # pylint: disable=broad-except
+            LOG.debug("Failed to detach session: %s", str(error))
 
     def _frida_range_to_mem_range(self, dict_range: Dict[str, Any],
                                   with_data: bool) -> MemoryRange:
@@ -155,18 +177,37 @@ def _str_to_architecture(frida_arch: str) -> Architecture:
     raise ValueError
 
 
-def spawn_and_instrument(
-        pe_path: Path, text_section_ranges: List[MemoryRange],
-        notify_oep_reached: OepReachedCallback) -> ProcessController:
+def _get_rundll32_path() -> str:
+    interpreter_is_32_bit = struct.calcsize("P") * 8 == 32
+    system_root = os.environ.get("SystemRoot", "C:\\Windows")
+    if interpreter_is_32_bit:
+        syswow64_path = os.path.join(system_root, "SysWOW64", "rundll32.exe")
+        if os.path.isfile(syswow64_path):
+            return syswow64_path
+
+    return os.path.join(system_root, "System32", "rundll32.exe")
+
+
+def _prepend_to_path(directory: str) -> None:
+    os.environ["PATH"] = os.pathsep.join(
+        [directory, os.environ.get("PATH", "")])
+
+
+def spawn_and_instrument(pe_path: Path,
+                         text_section_ranges: List[MemoryRange],
+                         notify_oep_reached: OepReachedCallback,
+                         verbose: bool = False) -> ProcessController:
     pid: int
-    if pe_path.suffix == ".dll":
-        # Use `rundll32` to load the DLL
-        rundll32_path = "C:\\Windows\\System32\\rundll32.exe"
-        pid = frida.spawn(
-            rundll32_path,
-            [rundll32_path, str(pe_path.absolute()), "#0"])
+    pe_directory = str(pe_path.resolve().parent)
+    target_is_dll = pe_path.suffix == ".dll"
+    if target_is_dll:
+        rundll32_path = _get_rundll32_path()
+        _prepend_to_path(pe_directory)
+        pid = frida.spawn(rundll32_path,
+                          argv=[rundll32_path, f"{pe_path.absolute()},#0"],
+                          cwd=pe_directory)
     else:
-        pid = frida.spawn(str(pe_path))
+        pid = frida.spawn(str(pe_path), cwd=pe_directory)
 
     main_module_name = pe_path.name
     session = frida.attach(pid)
@@ -180,8 +221,11 @@ def spawn_and_instrument(
     frida_rpc = script.exports
     process_controller = FridaProcessController(pid, main_module_name, session,
                                                 script)
+    if target_is_dll:
+        frida_rpc.add_dll_search_path(pe_directory)
     frida_rpc.setup_oep_tracing(pe_path.name, [[r.base, r.size]
-                                               for r in text_section_ranges])
+                                               for r in text_section_ranges],
+                                verbose)
     frida.resume(pid)
 
     return process_controller
@@ -199,8 +243,7 @@ def _frida_callback(notify_oep_reached: OepReachedCallback,
         payload = message['payload']
         event = payload.get('event', '')
         if event == 'oep_reached':
-            # Note: We cannot use RPCs in `on_message` callbacks, so we have to
-            # delay the actual dumping.
+            # RPCs are not usable from `on_message`, so dumping is deferred
             notify_oep_reached(int(payload['BASE'],
                                    16), int(payload['OEP'], 16),
                                bool(payload['DOTNET']))

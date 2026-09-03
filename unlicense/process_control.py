@@ -1,6 +1,6 @@
 import abc
 import enum
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 
 class Architecture(enum.Enum):
@@ -92,6 +92,15 @@ class ProcessController(abc.ABC):
     @abc.abstractmethod
     def write_process_memory(self, address: int, data: List[int]) -> None:
         raise NotImplementedError
+
+    def write_multiple_process_memory(
+            self, patches: List[Tuple[int, List[int]]]) -> None:
+        """
+        Write several (address, data) patches. IPC-backed implementations
+        should override this to batch them into fewer round-trips.
+        """
+        for address, data in patches:
+            self.write_process_memory(address, data)
 
     @abc.abstractmethod
     def terminate_process(self) -> None:

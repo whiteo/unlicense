@@ -1,17 +1,15 @@
 "use strict";
 
-const green = "\x1b[1;36m"
-const reset = "\x1b[0m"
-
+// No ANSI colors: legacy conhost without VT100 prints raw escape sequences
 let allocatedBuffers = [];
 let originalPageProtections = new Map();
 let oepTracingListeners = [];
 let oepReached = false;
+let verboseLoggingEnabled = false;
 
 // DLLs-related
 let skipDllOepInstr32 = null;
 let skipDllOepInstr64 = null;
-let dllOepCandidate = null;
 
 // TLS-related
 let skipTlsInstr32 = null;
@@ -19,7 +17,14 @@ let skipTlsInstr64 = null;
 let tlsCallbackCount = 0;
 
 function log(message) {
-    console.log(`${green}frida-agent${reset}: ${message}`);
+    if (!verboseLoggingEnabled) {
+        return;
+    }
+    info(message);
+}
+
+function info(message) {
+    console.log(`frida-agent: ${message}`);
 }
 
 function initializeTrampolines() {
@@ -49,24 +54,45 @@ function rangeContainsAddress(range, address) {
 function notifyOepFound(dumpedModule, oepCandidate) {
     oepReached = true;
     
-    // Make OEP ranges readable and writeable during the dumping phase
     setOepRangesProtection('rw-');
-    // Remove hooks used to find the OEP
     removeOepTracingHooks();
 
     let isDotNetInitialized = isDotNetProcess();
     send({ 'event': 'oep_reached', 'OEP': oepCandidate, 'BASE': dumpedModule.base, 'DOTNET': isDotNetInitialized })
-    let sync_op = recv('block_on_oep', function (_value) { });
+    let _sync_op = recv('block_on_oep', function (_value) { });
     // Note: never returns
-    sync_op.wait();
+    while(true) {
+        Thread.sleep(3600.0);
+    }
+}
+
+function winFunction(moduleName, exportName, retType, argTypes) {
+    const address = Module.findExportByName(moduleName, exportName);
+    if (address == null) {
+        return null;
+    }
+    return new NativeFunction(address, retType, argTypes,
+        Process.arch === 'ia32' ? 'stdcall' : 'default');
 }
 
 function isDotNetProcess() {
     return Process.findModuleByName("clr.dll") != null;
 }
 
+function unprotectFaultRange(dumpedModule, expectedOepRanges, faultAddress) {
+    for (const oepRange of expectedOepRanges) {
+        const sectionStart = dumpedModule.base.add(oepRange[0]);
+        const sectionSize = oepRange[1];
+        const sectionRange = { base: sectionStart, size: sectionSize };
+        if (rangeContainsAddress(sectionRange, faultAddress)) {
+            Memory.protect(sectionStart, sectionSize, 'rw-');
+            return true;
+        }
+    }
+    return false;
+}
+
 function makeOepRangesInaccessible(dumpedModule, expectedOepRanges) {
-    // Ensure potential OEP ranges are not accessible
     expectedOepRanges.forEach((oepRange) => {
         const sectionStart = dumpedModule.base.add(oepRange[0]);
         const expectedSectionSize = oepRange[1];
@@ -76,7 +102,6 @@ function makeOepRangesInaccessible(dumpedModule, expectedOepRanges) {
 }
 
 function setOepRangesProtection(protection) {
-    // Set pages' protection
     originalPageProtections.forEach((size, address_str, _map) => {
         Memory.protect(ptr(address_str), size, protection);
     });
@@ -90,41 +115,41 @@ function removeOepTracingHooks() {
 }
 
 function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) {
-    // Register an exception handler that'll detect the OEP
     Process.setExceptionHandler(exp => {
         let oepCandidate = exp.context.pc;
         let threadId = Process.getCurrentThreadId();
 
         if (exp.memory != null) {
-            // Weird case where executing code actually only triggers a "read"
-            // access violation on inaccessible pages. This can happen on some
-            // 32-bit executables.
-            if (exp.memory.operation == "read" && exp.memory.address.equals(exp.context.pc)) {
-                // If we're in a TLS callback, the first argument is the
-                // module's base address
-                if (!moduleIsDll && isTlsCallback(exp.context, dumpedModule)) {
+            // Some 32-bit executables report an execution fault on an
+            // inaccessible page as a "read" access violation
+            const execFaultAsRead = exp.memory.operation == "read" &&
+                exp.memory.address.equals(exp.context.pc);
+
+            // DLLs are handled below, where `DllMain` is skipped instead
+            if (execFaultAsRead && !moduleIsDll) {
+                if (isTlsCallback(exp.context, dumpedModule)) {
                     log(`TLS callback #${tlsCallbackCount} detected (at ${exp.context.pc}), skipping ...`);
                     tlsCallbackCount++;
 
-                    // Modify PC to skip the callback's execution and return
                     skipTlsCallback(exp.context);
                     return true;
                 }
 
-                log(`OEP found (thread #${threadId}): ${oepCandidate}`);
-                // Report the potential OEP
+                info(`OEP found (thread #${threadId}): ${oepCandidate}`);
                 notifyOepFound(dumpedModule, oepCandidate);
             }
 
-            // If the access violation is not an execution, "allow" the operation.
-            // Note: Pages will be reprotected on the next call to
-            // `NtProtectVirtualMemory`.
-            if (exp.memory.operation != "execute") {
-                Memory.protect(exp.memory.address, Process.pageSize, "rw-");
-                return true;
+            // Unprotect the whole section: the `NtProtectVirtualMemory` hook
+            // re-protects the entire range, so page-at-a-time never progresses
+            if (exp.memory.operation != "execute" && !execFaultAsRead) {
+                if (unprotectFaultRange(dumpedModule, expectedOepRanges, exp.memory.address)) {
+                    return true;
+                }
             }
         }
 
+        const ldrUnlockLoaderLockAddr = Module.findExportByName('ntdll', 'LdrUnlockLoaderLock');
+        const ldrUnlockLoaderLock = new NativeFunction(ldrUnlockLoaderLockAddr, 'uint32', ['uint32', 'pointer']);
         let expectionHandled = false;
         expectedOepRanges.forEach((oepRange) => {
             const sectionStart = dumpedModule.base.add(oepRange[0]);
@@ -138,31 +163,30 @@ function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) 
                     log(`TLS callback #${tlsCallbackCount} detected (at ${exp.context.pc}), skipping ...`);
                     tlsCallbackCount++;
 
-                    // Modify PC to skip the callback's execution and return
                     skipTlsCallback(exp.context);
                     expectionHandled = true;
                     return;
                 }
-                
+
                 if (moduleIsDll) {
-                    // Save the potential OEP and and skip `DllMain` (`DLL_PROCESS_ATTACH`).
-                    // Note: When dumping DLLs we have to release the loader
-                    // lock before starting to dump.
-                    // Other threads might call `DllMain` with the `DLL_THREAD_ATTACH`
-                    // or `DLL_THREAD_DETACH` reasons later so we also skip the `DllMain`
-                    // even after the OEP has been reached.
+                    // The loader lock must be released before dumping, and
+                    // other threads still call `DllMain` on attach/detach
                     if (!oepReached) {
-                        log(`OEP found (thread #${threadId}): ${oepCandidate}`);
-                        dllOepCandidate = oepCandidate;
-                    } 
+                        const threadId = Process.getCurrentThreadId();
+                        ldrUnlockLoaderLock(0, ptr(threadId << 16));
+
+                        info(`OEP found (thread #${threadId}): ${oepCandidate}`);
+                        // Note: never returns
+                        notifyOepFound(dumpedModule, oepCandidate);
+                    }
 
                     skipDllEntryPoint(exp.context);
                     expectionHandled = true;
                     return;
                 }
 
-                // Report the potential OEP
-                log(`OEP found (thread #${threadId}): ${oepCandidate}`);
+                info(`OEP found (thread #${threadId}): ${oepCandidate}`);
+                // Note: never returns
                 notifyOepFound(dumpedModule, oepCandidate);
             }
         });
@@ -174,14 +198,11 @@ function registerExceptionHandler(dumpedModule, expectedOepRanges, moduleIsDll) 
 
 function isTlsCallback(exceptionCtx, dumpedModule) {
     if (Process.arch == "x64") {
-        // If we're in a TLS callback, the first argument is the
-        // module's base address
         let moduleBase = exceptionCtx.rcx;
         if (!moduleBase.equals(dumpedModule.base)) {
             return false;
         }
-        // If we're in a TLS callback, the second argument is the
-        // reason (from 0 to 3).
+        // Second argument is the reason, from 0 to 3
         let reason = exceptionCtx.rdx;
         if (reason.compare(ptr(4)) > 0) {
             return false;
@@ -227,9 +248,25 @@ function skipDllEntryPoint(exceptionCtx) {
     }
 }
 
-// Define available RPCs
 rpc.exports = {
-    setupOepTracing: function (moduleName, expectedOepRanges) {
+    addDllSearchPath: function (directoryPath) {
+        const directory = Memory.allocUtf16String(directoryPath);
+
+        const setDllDirectory = winFunction('kernel32.dll', 'SetDllDirectoryW', 'int', ['pointer']);
+        if (setDllDirectory != null) {
+            setDllDirectory(directory);
+        }
+
+        // Only honored when the search path is restricted to `LOAD_LIBRARY_SEARCH_*`
+        const addDllDirectory = winFunction('kernel32.dll', 'AddDllDirectory', 'pointer', ['pointer']);
+        if (addDllDirectory != null) {
+            addDllDirectory(directory);
+        }
+
+        log(`DLL search path extended with "${directoryPath}"`);
+    },
+    setupOepTracing: function (moduleName, expectedOepRanges, verbose) {
+        verboseLoggingEnabled = verbose;
         log(`Setting up OEP tracing for "${moduleName}"`);
 
         let targetIsDll = moduleName.endsWith(".dll");
@@ -237,25 +274,9 @@ rpc.exports = {
 
         initializeTrampolines();
 
-        // If the target isn't a DLL, it should be loaded already
         if (!targetIsDll) {
             dumpedModule = Process.findModuleByName(moduleName);
         }
-
-        // Hook `ntdll.LdrLoadDll` on exit to get called at a point where the
-        // loader lock is released. Needed to unpack (32-bit) DLLs.
-        const loadDll = Module.findExportByName('ntdll', 'LdrLoadDll');
-        const loadDllListener = Interceptor.attach(loadDll, {
-            onLeave: function (_args) {
-                // If `dllOepCandidate` is set, proceed with the dumping
-                // but only once (for our target). Then let other executions go
-                // through as it's not DLLs we're intersted in.
-                if (dllOepCandidate != null && !oepReached) {
-                    notifyOepFound(dumpedModule, dllOepCandidate);
-                }
-            }
-        });
-        oepTracingListeners.push(loadDllListener);
 
         let exceptionHandlerRegistered = false;
         const ntProtectVirtualMemory = Module.findExportByName('ntdll', 'NtProtectVirtualMemory');
@@ -264,8 +285,7 @@ rpc.exports = {
                 onEnter: function (args) {
                     let addr = args[1].readPointer();
                     if (dumpedModule != null && addr.equals(dumpedModule.base)) {
-                        // Reset potential OEP ranges to not accessible to
-                        // (hopefully) catch the entry point next time.
+                        // Try to catch the entry point on the next pass
                         makeOepRangesInaccessible(dumpedModule, expectedOepRanges);
                         if (!exceptionHandlerRegistered) {
                             registerExceptionHandler(dumpedModule, expectedOepRanges, targetIsDll);
@@ -277,9 +297,8 @@ rpc.exports = {
             oepTracingListeners.push(ntProtectVirtualMemoryListener);
         }
 
-        // Hook `ntdll.RtlActivateActivationContextUnsafeFast` on exit as a mean
-        // to get called after new PE images are loaded and before their entry
-        // point is called. Needed to unpack DLLs.
+        // Called after a new PE image is loaded but before its entry
+        // point runs. Needed to unpack DLLs.
         let initializeFusionHooked = false;
         const activateActivationContext = Module.findExportByName('ntdll', 'RtlActivateActivationContextUnsafeFast');
         const activateActivationContextListener = Interceptor.attach(activateActivationContext, {
@@ -287,12 +306,10 @@ rpc.exports = {
                 if (dumpedModule == null) {
                     dumpedModule = Process.findModuleByName(moduleName);
                     if (dumpedModule == null) {
-                        // Module isn't loaded yet
                         return;
                     }
                     log(`Target module has been loaded (thread #${this.threadId}) ...`);
                 }
-                // After this, the target module is loaded.
 
                 if (targetIsDll) {
                     if (!exceptionHandlerRegistered) {
@@ -302,9 +319,8 @@ rpc.exports = {
                     }
                 }
 
-                // Hook `clr.InitializeFusion` if present.
-                // This is used to detect a good point during the CLR's
-                // initialization, to dump .NET EXE assemblies
+                // A usable point in the CLR's initialization to dump .NET
+                // EXE assemblies
                 const initializeFusion = Module.findExportByName('clr', 'InitializeFusion');
                 if (initializeFusion != null && !initializeFusionHooked) {
                     const initializeFusionListener = Interceptor.attach(initializeFusion, {
@@ -321,7 +337,6 @@ rpc.exports = {
         oepTracingListeners.push(activateActivationContextListener);
     },
     notifyDumpingFinished: function () {
-        // Make OEP executable again once dumping is finished
         setOepRangesProtection('rwx');
     },
     getArchitecture: function () { return Process.arch; },
@@ -387,5 +402,10 @@ rpc.exports = {
     },
     writeProcessMemory: function (address, bytes) {
         return Memory.writeByteArray(ptr(address), bytes);
+    },
+    writeMultipleProcessMemory: function (patches) {
+        patches.forEach(([address, bytes]) => {
+            Memory.writeByteArray(ptr(address), bytes);
+        });
     }
 };
