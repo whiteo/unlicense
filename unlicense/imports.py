@@ -39,7 +39,6 @@ def find_wrapped_imports(
     ptr_size = process_controller.pointer_size
     ptr_format = pointer_size_to_fmt(ptr_size)
 
-    # Not supposed to be None
     assert text_section_range.data is not None
     text_section_data = text_section_range.data
 
@@ -47,7 +46,6 @@ def find_wrapped_imports(
     api_to_calls: ImportToCallSiteDict = defaultdict(list)
     i = 0
     while i < text_section_range.size:
-        # Quick pre-filter
         if not _is_wrapped_thunk_jmp(text_section_data, i) and \
                 not _is_wrapped_call(text_section_data, i) and \
                 not _is_wrapped_tail_call(text_section_data, i) and \
@@ -55,8 +53,7 @@ def find_wrapped_imports(
             i += 1
             continue
 
-        # Check if the instruction is a jmp or should be replaced with a jmp.
-        # This include checking for tail calls ("jmp X; int 3").
+        # Tail calls ("jmp X; int 3") also have to become a jmp
         if text_section_data[i] == 0xE9 or \
                 text_section_data[i:i + 2] == bytes([0x90, 0xE9]) or \
                 text_section_data[i:i + 2] == bytes([0xFF, 0x25]) or \
@@ -98,7 +95,6 @@ def find_wrapped_imports(
         next_offset = i + (max(slot_size, PATCHED_INSTRUCTION_SIZE)
                            if patchable else slot_size)
 
-        # Parse destination address or ignore in case of error
         if op.type == X86_OP_IMM:
             call_dest = op.value.imm
             ptr_addr = None
@@ -124,7 +120,6 @@ def find_wrapped_imports(
             i += 1
             continue
 
-        # Verify that the destination is outside of the .text section
         if not text_section_range.contains(call_dest):
             # Not wrapped, add it to list of "resolved wrappers"
             if call_dest in exports_dict:

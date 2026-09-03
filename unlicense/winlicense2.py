@@ -33,7 +33,6 @@ def fix_and_dump_pe(process_controller: ProcessController, pe_file_path: str,
     arch = process_controller.architecture
     exports_dict = process_controller.enumerate_exported_functions()
 
-    # Instanciate the disassembler
     if arch == Architecture.X86_32:
         cs_mode = CS_MODE_32
     elif arch == Architecture.X86_64:
@@ -67,14 +66,11 @@ def fix_and_dump_pe(process_controller: ProcessController, pe_file_path: str,
     LOG.info("Generated the fake IAT at %s, size=%s", hex(iat_addr),
              hex(iat_size))
 
-    # Ensure the range is writable
     process_controller.set_memory_protection(text_section_range.base,
                                              text_section_range.size, "rwx")
-    # Replace detected references to wrappers or imports
     LOG.info("Patching call and jmp sites ...")
     _fix_import_references_in_process(api_to_calls, iat_addr,
                                       process_controller)
-    # Restore memory protection to RX
     process_controller.set_memory_protection(text_section_range.base,
                                              text_section_range.size, "r-x")
 
@@ -143,12 +139,10 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
         try:
             return process_controller.read_process_memory(addr, size)
         except ReadProcessMemoryError:
-            # In case we crossed a page boundary and tried to read an invalid
-            # page, reduce size to stop at page boundary, and try again.
+            # Crossed into an invalid page: stop at the page boundary
             size = page_size - (addr % page_size)
         return process_controller.read_process_memory(addr, size)
 
-    # Iterate over the set of potential import wrappers and try to resolve them
     resolved_wrappers: Dict[int, int] = {}
     problematic_wrappers = set()
     for call_addr, call_size, instr_was_jmp, wrapper_addr, _, patchable in \
@@ -162,11 +156,9 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
             continue
 
         if wrapper_addr in problematic_wrappers:
-            # Already failed to resolve this one, ignore
             LOG.debug("Skipping unresolved wrapper")
             continue
 
-        # If 32-bit executable, try hash-matching
         if export_hashes is not None and arch == Architecture.X86_32:
             try:
                 import_hash = compute_function_hash(md, wrapper_addr, get_data,
@@ -188,7 +180,6 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
                         (call_addr, call_size, instr_was_jmp, patchable))
                     continue
 
-        # Try to resolve the destination address by emulating the wrapper
         resolved_addr = resolve_wrapped_api(call_addr, process_controller,
                                             call_addr + call_size)
         if resolved_addr is None:
@@ -221,11 +212,9 @@ def _generate_new_iat_in_process(
     ptr_size = process_controller.pointer_size
     ptr_format = pointer_size_to_fmt(ptr_size)
     iat_size = len(imports_dict) * ptr_size
-    # Allocate a new buffer in the target process
     iat_addr = process_controller.allocate_process_memory(
         iat_size, near_to_ptr)
 
-    # Generate the new IAT and write it into the buffer
     new_iat_data = bytearray()
     for import_addr in imports_dict:
         new_iat_data += struct.pack(ptr_format, import_addr)

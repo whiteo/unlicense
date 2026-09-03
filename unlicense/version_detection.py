@@ -16,9 +16,7 @@ def detect_winlicense_version(pe_file_path: str) -> Optional[int]:
         LOG.error("Failed to parse PE '%s'", pe_file_path)
         return None
 
-    # Version 3.x
-    # Note: The '.boot' section might not always be present, so we do not check
-    # for it.
+    # Version 3.x ('.boot' is not always present, so it is not checked)
     try:
         if binary.get_section(".themida") is not None or \
            binary.get_section(".winlice") is not None:
@@ -48,5 +46,4 @@ def detect_winlicense_version(pe_file_path: str) -> Optional[int]:
             if pattern == list(section.content[:len(pattern)]):
                 return 2
 
-    # Failed to automatically detect version
     return None

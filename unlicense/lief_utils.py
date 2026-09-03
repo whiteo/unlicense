@@ -2,9 +2,8 @@ from typing import Iterator
 import lief
 
 
-# Note(ergrelet): this wrapper is a workaround for some bug in LIEF. We're not
-# iterating directly on `binary.sections` because it seems LIEF crashes for some
-# unkown reasons on certain executables
+# Indexing instead of iterating `binary.sections`: LIEF crashes on some
+# executables otherwise
 def lief_pe_sections(binary: lief.PE.Binary) -> Iterator[lief.PE.Section]:
     num_of_sections = len(binary.sections)
     for i in range(num_of_sections):

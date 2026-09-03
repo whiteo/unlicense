@@ -28,13 +28,11 @@ class FridaProcessController(ProcessController):
                  frida_script: frida.core.Script):
         frida_rpc = frida_script.exports
 
-        # Initialize ProcessController
         super().__init__(pid, main_module_name,
                          _str_to_architecture(frida_rpc.get_architecture()),
                          frida_rpc.get_pointer_size(),
                          frida_rpc.get_page_size())
 
-        # Initialize FridaProcessController specifics
         self._frida_rpc = frida_rpc
         self._frida_session = frida_session
         self._exported_functions_cache: Optional[Dict[int, Dict[str,
@@ -203,7 +201,6 @@ def spawn_and_instrument(pe_path: Path,
     pe_directory = str(pe_path.resolve().parent)
     target_is_dll = pe_path.suffix == ".dll"
     if target_is_dll:
-        # Use `rundll32` to load the DLL
         rundll32_path = _get_rundll32_path()
         _prepend_to_path(pe_directory)
         pid = frida.spawn(rundll32_path,
@@ -246,8 +243,7 @@ def _frida_callback(notify_oep_reached: OepReachedCallback,
         payload = message['payload']
         event = payload.get('event', '')
         if event == 'oep_reached':
-            # Note: We cannot use RPCs in `on_message` callbacks, so we have to
-            # delay the actual dumping.
+            # RPCs are not usable from `on_message`, so dumping is deferred
             notify_oep_reached(int(payload['BASE'],
                                    16), int(payload['OEP'], 16),
                                bool(payload['DOTNET']))
