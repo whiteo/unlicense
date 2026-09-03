@@ -10,14 +10,18 @@ from .dump_utils import pointer_size_to_fmt
 from .process_control import Architecture, MemoryRange, ProcessController, ProcessControllerException
 
 LOG = logging.getLogger(__name__)
+# Size of the `FF 15/25 disp32` instruction call sites are replaced with
+PATCHED_INSTRUCTION_SIZE = 6
+# Bytes that are safe to overwrite when the patch is longer than the call site
+PADDING_BYTES = frozenset((0x90, 0xCC, 0x00))
 
 # Describes a map of API addresses to every call site that should point to it
-# (instr_addr, call_size, instr_was_jmp)
-ImportCallSiteInfo = Tuple[int, int, bool]
+# (instr_addr, call_size, instr_was_jmp, patchable)
+ImportCallSiteInfo = Tuple[int, int, bool, bool]
 ImportToCallSiteDict = Dict[int, List[ImportCallSiteInfo]]
 # Describes a set of all found call sites
-# (instr_addr, call_size, instr_was_jmp, call_dest, ptr_addr)
-ImportWrapperInfo = Tuple[int, int, bool, int, Optional[int]]
+# (instr_addr, call_size, instr_was_jmp, call_dest, ptr_addr, patchable)
+ImportWrapperInfo = Tuple[int, int, bool, int, Optional[int], bool]
 WrapperSet = Set[ImportWrapperInfo]
 
 
@@ -69,10 +73,12 @@ def find_wrapped_imports(
         if instruction is None:
             i += 1
             continue
+        had_nop = False
         if instruction.mnemonic in ["call", "jmp"]:
             call_size = instruction.size
             op = instruction.operands[0]
         elif instruction.mnemonic == "nop":
+            had_nop = True
             instruction = next(instrs, None)
             if instruction is None:
                 i += 1
@@ -86,6 +92,11 @@ def find_wrapped_imports(
         else:
             i += 1
             continue
+
+        slot_size = call_size + 1 if had_nop else call_size
+        patchable = _call_site_is_patchable(text_section_data, i, slot_size)
+        next_offset = i + (max(slot_size, PATCHED_INSTRUCTION_SIZE)
+                           if patchable else slot_size)
 
         # Parse destination address or ignore in case of error
         if op.type == X86_OP_IMM:
@@ -118,18 +129,34 @@ def find_wrapped_imports(
             # Not wrapped, add it to list of "resolved wrappers"
             if call_dest in exports_dict:
                 api_to_calls[call_dest].append(
-                    (instr_addr, call_size, instr_was_jmp))
-                i += call_size + 1
+                    (instr_addr, call_size, instr_was_jmp, patchable))
+                i = next_offset
                 continue
             # Wrapped, add it to set of wrappers to resolve
             if _is_in_executable_range(call_dest, process_controller):
                 wrapper_set.add((instr_addr, call_size, instr_was_jmp,
-                                 call_dest, ptr_addr))
-                i += call_size + 1
+                                 call_dest, ptr_addr, patchable))
+                i = next_offset
                 continue
         i += 1
 
     return api_to_calls, wrapper_set
+
+
+def _call_site_is_patchable(code_section_data: bytes, offset: int,
+                            slot_size: int) -> bool:
+    """
+    Check whether `PATCHED_INSTRUCTION_SIZE` bytes can be written at `offset`
+    without overwriting anything but padding.
+    """
+    if offset + PATCHED_INSTRUCTION_SIZE > len(code_section_data):
+        return False
+    if slot_size >= PATCHED_INSTRUCTION_SIZE:
+        return True
+
+    tail = code_section_data[offset + slot_size:offset +
+                             PATCHED_INSTRUCTION_SIZE]
+    return all(byte in PADDING_BYTES for byte in tail)
 
 
 def _is_indirect_call(code_section_data: bytes, offset: int) -> bool:

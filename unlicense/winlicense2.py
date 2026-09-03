@@ -145,13 +145,14 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
     # Iterate over the set of potential import wrappers and try to resolve them
     resolved_wrappers: Dict[int, int] = {}
     problematic_wrappers = set()
-    for call_addr, call_size, instr_was_jmp, wrapper_addr, _ in wrapper_set:
+    for call_addr, call_size, instr_was_jmp, wrapper_addr, _, patchable in \
+            wrapper_set:
         resolved_addr = resolved_wrappers.get(wrapper_addr)
         if resolved_addr is not None:
             LOG.debug("Already resolved wrapper: %s -> %s", hex(wrapper_addr),
                       hex(resolved_addr))
             api_to_calls[resolved_addr].append(
-                (call_addr, call_size, instr_was_jmp))
+                (call_addr, call_size, instr_was_jmp, patchable))
             continue
 
         if wrapper_addr in problematic_wrappers:
@@ -178,7 +179,7 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
                               hex(resolved_addr))
                     resolved_wrappers[wrapper_addr] = resolved_addr
                     api_to_calls[resolved_addr].append(
-                        (call_addr, call_size, instr_was_jmp))
+                        (call_addr, call_size, instr_was_jmp, patchable))
                     continue
 
         # Try to resolve the destination address by emulating the wrapper
@@ -189,7 +190,7 @@ def _resolve_imports(api_to_calls: ImportToCallSiteDict,
                       hex(resolved_addr))
             resolved_wrappers[wrapper_addr] = resolved_addr
             api_to_calls[resolved_addr].append(
-                (call_addr, call_size, instr_was_jmp))
+                (call_addr, call_size, instr_was_jmp, patchable))
         else:
             problematic_wrappers.add(wrapper_addr)
 
@@ -231,7 +232,9 @@ def _fix_import_references_in_process(
 
     patches: List[Tuple[int, List[int]]] = []
     for i, call_addrs in enumerate(api_to_calls.values()):
-        for call_addr, _, instr_was_jmp in call_addrs:
+        for call_addr, _, instr_was_jmp, patchable in call_addrs:
+            if not patchable:
+                continue
             if arch == Architecture.X86_32:
                 # Absolute
                 operand = iat_addr + i * ptr_size
