@@ -60,6 +60,15 @@ function notifyOepFound(dumpedModule, oepCandidate) {
     }
 }
 
+function winFunction(moduleName, exportName, retType, argTypes) {
+    const address = Module.findExportByName(moduleName, exportName);
+    if (address == null) {
+        return null;
+    }
+    return new NativeFunction(address, retType, argTypes,
+        Process.arch === 'ia32' ? 'stdcall' : 'default');
+}
+
 function isDotNetProcess() {
     return Process.findModuleByName("clr.dll") != null;
 }
@@ -235,6 +244,22 @@ function skipDllEntryPoint(exceptionCtx) {
 
 // Define available RPCs
 rpc.exports = {
+    addDllSearchPath: function (directoryPath) {
+        const directory = Memory.allocUtf16String(directoryPath);
+
+        const setDllDirectory = winFunction('kernel32.dll', 'SetDllDirectoryW', 'int', ['pointer']);
+        if (setDllDirectory != null) {
+            setDllDirectory(directory);
+        }
+
+        // Only honored when the search path is restricted to `LOAD_LIBRARY_SEARCH_*`
+        const addDllDirectory = winFunction('kernel32.dll', 'AddDllDirectory', 'pointer', ['pointer']);
+        if (addDllDirectory != null) {
+            addDllDirectory(directory);
+        }
+
+        log(`DLL search path extended with "${directoryPath}"`);
+    },
     setupOepTracing: function (moduleName, expectedOepRanges) {
         log(`Setting up OEP tracing for "${moduleName}"`);
 
