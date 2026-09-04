@@ -1,9 +1,16 @@
-# Unlicense <img src="https://raw.githubusercontent.com/ergrelet/unlicense/dev/assets/unlicense.ico" width="40">
+# Unlicense <img src="https://raw.githubusercontent.com/whiteo/unlicense/main/assets/unlicense.ico" width="40">
 
-[![GitHub release](https://img.shields.io/github/release/ergrelet/unlicense.svg)](https://github.com/ergrelet/unlicense/releases) [![Minimum Python version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/) ![CI status](https://github.com/ergrelet/unlicense/actions/workflows/check.yml/badge.svg?branch=main)
+[![CI status](https://github.com/whiteo/unlicense/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/whiteo/unlicense/actions/workflows/check.yml) [![Minimum Python version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 A Python 3 tool to dynamically unpack executables protected with
 Themida/WinLicense 2.x and 3.x.
+
+> **This is a maintained fork** of
+> [ergrelet/unlicense](https://github.com/ergrelet/unlicense), which has had no
+> commits since August 2023. On top of upstream 0.4.0 it fixes DLL unpacking,
+> import resolution, IAT detection for WinLicense 3.x and several crashes and
+> hangs — see [CHANGELOG.md](CHANGELOG.md) for the full list. Issues and pull
+> requests are welcome here.
 
 Warning: This tool will execute the target executable. Make sure to use this
 tool in a VM if you're unsure about what the target executable does.
@@ -28,19 +35,33 @@ Note: You need to use a 32-bit Python interpreter to dump 32-bit executables.
 
 ## How To
 
-### Download
+### Install
 
-You can either download the PyInstaller-generated executables from the "Releases"
-section or fetch the project with `git` and install it with `pip`:
+There are no tagged releases in this fork yet, but CI builds standalone 32-bit
+and 64-bit executables on every push. Open the latest
+[PyInstaller Check run](https://github.com/whiteo/unlicense/actions/workflows/pyinstaller.yml)
+and download the `unlicense-py3.11-x86` or `unlicense-py3.11-x64` artifact.
+Note that GitHub keeps those artifacts for 3 days and only serves them to
+signed-in users.
+
+Otherwise, install from source with `pip`:
 ```
-pip install git+https://github.com/ergrelet/unlicense.git
+pip install git+https://github.com/whiteo/unlicense.git
 ```
+
+You can also build the executable yourself by running PyInstaller against
+`unlicense.spec`. Remember to build with a 32-bit interpreter if you need to
+dump 32-bit targets.
+
+Prebuilt executables of upstream 0.4.0 are available in the
+[upstream releases](https://github.com/ergrelet/unlicense/releases), but they
+predate every fix listed in the CHANGELOG.
 
 ### Use
 
 If you don't want to deal the command-line interface (CLI) you can simply
-drag-and-drop the target binary on the appropriate (32-bit or 64-bit) `unlicense`
-executable (which is available in the "Releases" section).
+drag-and-drop the target binary on the appropriate (32-bit or 64-bit)
+`unlicense` executable.
 
 Otherwise here's what the CLI looks like:
 ```
@@ -81,3 +102,8 @@ FLAGS
 NOTES
     You can also use flags syntax for POSITIONAL ARGUMENTS
 ```
+
+## Credits
+
+Original author: [Erwan Grelet](https://github.com/ergrelet). This fork keeps
+the upstream GPL-3.0-or-later license.

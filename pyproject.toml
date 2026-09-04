@@ -3,7 +3,10 @@ name = "unlicense"
 version = "0.4.0"
 description = "Unpack executables protected with Themida/WinLicense 2.x and 3.x"
 authors = ["Erwan Grelet"]
+maintainers = ["whiteo"]
 license = "GPL-3.0-or-later"
+readme = "README.md"
+repository = "https://github.com/whiteo/unlicense"
 
 [tool.poetry.dependencies]
 python = ">=3.9, <3.12"
